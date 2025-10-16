@@ -74,6 +74,9 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from typing import List
+from supabase import create_client, Client
+import uuid
+from datetime import datetime
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -84,6 +87,17 @@ os.environ["MISTRAL_API_KEY"] = "0OYFp5b31qOfBEYVppnkUlDmn4uuLen4"
 
 # Your business WhatsApp link
 WHATSAPP_SUPPORT_LINK = "https://wa.me/1234567890"  # UPDATE THIS
+
+# Initialize Supabase client
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase connected")
+else:
+    print("⚠️  Supabase not configured - running without persistence")
 
 # Initialize AI components
 print("Initializing customer support agent...")
@@ -254,10 +268,7 @@ def get_ai_response(question: str) -> dict:
 def chat():
     """
     Main chat endpoint - receives customer questions and returns AI responses
-    
-    This endpoint format matches the LOVABLE FRONTEND API CALL shown above.
-    When you update the frontend code in the header comment, Copilot will
-    automatically adjust this endpoint to match.
+    Now creates/updates tickets in Supabase for admin dashboard
     """
     try:
         data = request.get_json()
@@ -269,9 +280,58 @@ def chat():
             }), 400
         
         question = data['question']
+        ticket_id = data.get('ticket_id', None)
+        customer_info = data.get('customer_info', {})
         
         # Get AI response
         response = get_ai_response(question)
+        
+        # Store in Supabase if configured
+        if supabase:
+            try:
+                # Create new ticket if no ticket_id provided
+                if not ticket_id:
+                    ticket_data = {
+                        "ticket_id": str(uuid.uuid4()),
+                        "customer_name": customer_info.get('name', 'Anonymous'),
+                        "customer_email": customer_info.get('email', ''),
+                        "customer_location": customer_info.get('location', ''),
+                        "customer_user_type": customer_info.get('user_type', 'Customer'),
+                        "inquiry_text": question,
+                        "inquiry_type": customer_info.get('inquiry_type', 'general'),
+                        "priority": 'high' if response.get('needs_human_support') else 'medium',
+                        "status": "ai_responded" if not response.get('needs_human_support') else "new",
+                        "ai_confidence_score": 0.85 if not response.get('needs_human_support') else 0.5,
+                        "created_at": datetime.utcnow().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat()
+                    }
+                    
+                    supabase.table('tickets').insert(ticket_data).execute()
+                    ticket_id = ticket_data['ticket_id']
+                    
+                    # Store customer message
+                    supabase.table('messages').insert({
+                        "message_id": str(uuid.uuid4()),
+                        "ticket_id": ticket_id,
+                        "sender_type": "customer",
+                        "message_text": question,
+                        "created_at": datetime.utcnow().isoformat()
+                    }).execute()
+                
+                # Store AI response message
+                supabase.table('messages').insert({
+                    "message_id": str(uuid.uuid4()),
+                    "ticket_id": ticket_id,
+                    "sender_type": "ai",
+                    "message_text": response['answer'],
+                    "created_at": datetime.utcnow().isoformat()
+                }).execute()
+                
+            except Exception as e:
+                print(f"Error saving to Supabase: {e}")
+        
+        # Add ticket_id to response
+        response['ticket_id'] = ticket_id
         
         return jsonify(response), 200
     
@@ -281,12 +341,124 @@ def chat():
             "needs_human_support": True
         }), 500
 
+@app.route('/api/tickets', methods=['GET'])
+def get_tickets():
+    """
+    Get all tickets for admin dashboard
+    Supports filtering by status
+    """
+    if not supabase:
+        return jsonify({"error": "Supabase not configured"}), 503
+    
+    try:
+        status_filter = request.args.get('status', None)
+        
+        query = supabase.table('tickets').select('*').order('created_at', desc=True)
+        
+        if status_filter:
+            query = query.eq('status', status_filter)
+        
+        result = query.execute()
+        
+        return jsonify({
+            "tickets": result.data,
+            "total": len(result.data)
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/tickets/<ticket_id>', methods=['GET'])
+def get_ticket_detail(ticket_id):
+    """
+    Get specific ticket details with conversation history
+    """
+    if not supabase:
+        return jsonify({"error": "Supabase not configured"}), 503
+    
+    try:
+        # Get ticket
+        ticket_result = supabase.table('tickets').select('*').eq('ticket_id', ticket_id).execute()
+        
+        if not ticket_result.data:
+            return jsonify({"error": "Ticket not found"}), 404
+        
+        # Get messages
+        messages_result = supabase.table('messages').select('*').eq('ticket_id', ticket_id).order('created_at', desc=False).execute()
+        
+        ticket = ticket_result.data[0]
+        ticket['messages'] = messages_result.data
+        
+        return jsonify(ticket), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/tickets/<ticket_id>', methods=['PATCH'])
+def update_ticket(ticket_id):
+    """
+    Update ticket (e.g., mark as resolved)
+    """
+    if not supabase:
+        return jsonify({"error": "Supabase not configured"}), 503
+    
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No update data provided"}), 400
+        
+        # Add updated_at timestamp
+        data['updated_at'] = datetime.utcnow().isoformat()
+        
+        result = supabase.table('tickets').update(data).eq('ticket_id', ticket_id).execute()
+        
+        if not result.data:
+            return jsonify({"error": "Ticket not found"}), 404
+        
+        return jsonify({
+            "success": True,
+            "ticket": result.data[0]
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/tickets/summary', methods=['GET'])
+def get_tickets_summary():
+    """
+    Get summary counts for admin dashboard
+    """
+    if not supabase:
+        return jsonify({"error": "Supabase not configured"}), 503
+    
+    try:
+        # Get counts by status
+        all_tickets = supabase.table('tickets').select('status').execute()
+        
+        resolved_count = sum(1 for t in all_tickets.data if t['status'] == 'resolved')
+        unresolved_count = len(all_tickets.data) - resolved_count
+        
+        return jsonify({
+            "resolved": resolved_count,
+            "unresolved": unresolved_count,
+            "total": len(all_tickets.data)
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "documentsLoaded": len(docs)
+        "documentsLoaded": len(docs),
+        "supabaseConnected": supabase is not None
     }), 200
 
 # ============================================================================
@@ -300,6 +472,7 @@ if __name__ == "__main__":
     print(f"\nAPI running on: http://localhost:8000")
     print(f"Chat endpoint: http://localhost:8000/chat")
     print(f"Health check: http://localhost:8000/api/health")
+    print(f"\nSupabase: {'✅ Connected' if supabase else '⚠️  Not configured'}")
     print("\nReady to receive requests from Lovable frontend!")
     print("="*60 + "\n")
     
