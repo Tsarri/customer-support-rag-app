@@ -1,17 +1,66 @@
+"""
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    LOVABLE FRONTEND INTEGRATION                             ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+INSTRUCTIONS FOR COPILOT:
+When the section below is updated with new Lovable frontend code, automatically 
+update the backend API to match the request/response format shown.
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    CURRENT FRONTEND API CALL                                ║
+║                    (Paste your Lovable code here)                           ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+// Example - Replace this with your actual Lovable API call code:
+
+const sendMessage = async (message: string) => {
+  const response = await fetch('http://localhost:5001/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      question: message
+    })
+  });
+  
+  const data = await response.json();
+  return data;
+};
+
+Expected Response:
+{
+  answer: string,
+  needsHumanSupport: boolean,
+  whatsappLink: string
+}
+
+Last Updated: [Update this date when you paste new code]
+Frontend Repo: [Your Lovable frontend repo URL]
+
+╔════════════════════════════════════════════════════════════════════════════╗
+"""
+
 import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pandas as pd
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
-from langgraph.graph import START, StateGraph
-from typing_extensions import List, TypedDict
+from typing import List
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Enable CORS for frontend communication
 
 # Set up Mistral API key automatically
 os.environ["MISTRAL_API_KEY"] = "0OYFp5b31qOfBEYVppnkUlDmn4uuLen4"
 
 # Your business WhatsApp link
-WHATSAPP_SUPPORT_LINK = "https://wa.me/1234567890"  # UPDATE THIS with your actual WhatsApp number
+WHATSAPP_SUPPORT_LINK = "https://wa.me/1234567890"  # UPDATE THIS
 
 # Initialize AI components
 print("Initializing customer support agent...")
@@ -25,23 +74,21 @@ vector_store = InMemoryVectorStore(embeddings)
 # Path to support documents
 support_docs_path = os.path.join(os.path.dirname(__file__), "SupportDocuments")
 
-# Load support documents from spreadsheet
-print("Loading support documentation from spreadsheet...")
-
 def load_spreadsheet_documents():
-    """Load documents from Excel or CSV files in the SupportDocuments folder"""
+    """Load documents from Excel or CSV files"""
     documents = []
     
-    # Look for spreadsheet files in the SupportDocuments folder
+    if not os.path.exists(support_docs_path):
+        print(f"Warning: {support_docs_path} does not exist")
+        return documents
+    
     for filename in os.listdir(support_docs_path):
         filepath = os.path.join(support_docs_path, filename)
         
-        # Skip if not a file
         if not os.path.isfile(filepath):
             continue
         
         try:
-            # Load Excel or CSV file
             if filename.endswith('.xlsx') or filename.endswith('.xls'):
                 df = pd.read_excel(filepath)
                 print(f"Loaded Excel file: {filename}")
@@ -53,7 +100,6 @@ def load_spreadsheet_documents():
             
             # Process each row as a document
             for index, row in df.iterrows():
-                # Try different column name combinations
                 # Format 1: Question/Answer style
                 if 'Question' in df.columns and 'Answer' in df.columns:
                     content = f"Question: {row['Question']}\n\nAnswer: {row['Answer']}"
@@ -64,7 +110,7 @@ def load_spreadsheet_documents():
                     content = f"Topic: {row['Topic']}\n\n{row['Content']}"
                     category = row.get('Category', 'General')
                 
-                # Format 3: Generic - use first two columns
+                # Format 3: Generic
                 else:
                     columns = df.columns.tolist()
                     if len(columns) >= 2:
@@ -73,7 +119,6 @@ def load_spreadsheet_documents():
                     else:
                         continue
                 
-                # Create a document
                 doc = Document(
                     page_content=content,
                     metadata={
@@ -90,24 +135,19 @@ def load_spreadsheet_documents():
     
     return documents
 
-# Load the documents
+# Load documents
+print("Loading support documentation...")
 docs = load_spreadsheet_documents()
 
 if len(docs) == 0:
     print("\nWARNING: No documents were loaded!")
-    print("Please make sure you have a .xlsx or .csv file in the SupportDocuments folder")
-    print("with columns like: Question, Answer, Category")
-    print("or: Topic, Content, Category\n")
+    print("Add .xlsx or .csv files to the SupportDocuments folder")
 else:
-    print(f"Loaded {len(docs)} support entries from spreadsheet\n")
-
-# Store in vector database
-print("Indexing documents...")
-if docs:
+    print(f"Loaded {len(docs)} support entries")
     vector_store.add_documents(documents=docs)
-    print("Support documentation indexed successfully\n")
+    print("Documentation indexed successfully\n")
 
-# Create the prompt template for the support agent
+# Create the prompt template
 support_prompt_template = """You are a helpful customer support agent for a digital contract platform that uses Stripe for payments.
 
 User Question: {question}
@@ -116,57 +156,41 @@ Relevant Documentation:
 {context}
 
 Instructions:
-- Answer the user's question based on the provided documentation
+- Answer based on the documentation
 - Be friendly, concise, and helpful
-- Use simple language that's easy to understand
-- If the documentation doesn't contain enough information to fully answer the question, or if the issue seems complex, say so honestly
-- For complex issues you can't resolve, mention that the user should contact a human support agent
+- Use simple language
+- If you can't fully answer or the issue is complex, say so honestly
+- For complex issues, mention contacting human support
 
 Provide a clear, helpful response:"""
 
 support_prompt = PromptTemplate.from_template(support_prompt_template)
 
-# Define the state for the application
-class State(TypedDict):
-    question: str
-    context: List[Document]
-    answer: str
-    needs_human_support: bool
-
-def retrieve(state: State):
-    """Retrieve relevant documentation based on the user's question"""
-    question = state["question"]
-    
-    # Search for relevant documents
-    if len(docs) > 0:
-        retrieved_docs = vector_store.similarity_search(question, k=3)
-    else:
-        retrieved_docs = []
-    
-    return {"context": retrieved_docs}
-
-def generate(state: State):
-    """Generate a response based on the retrieved documentation"""
+def get_ai_response(question: str) -> dict:
+    """Generate AI response for a customer question"""
     try:
-        # Check if we have any context
-        if not state["context"]:
+        # Retrieve relevant documents
+        if len(docs) > 0:
+            retrieved_docs = vector_store.similarity_search(question, k=3)
+        else:
             return {
-                "answer": "I don't have enough information in my knowledge base to answer that question. Let me connect you with a human support agent who can help.",
-                "needs_human_support": True
+                "answer": "I don't have access to support documentation right now. Please contact our support team for assistance.",
+                "needsHumanSupport": True,
+                "whatsappLink": WHATSAPP_SUPPORT_LINK
             }
         
-        # Format the context
-        docs_content = "\n\n".join([doc.page_content for doc in state["context"]])
+        # Format context
+        docs_content = "\n\n".join([doc.page_content for doc in retrieved_docs])
         
-        # Generate the response
+        # Generate response
         messages = support_prompt.invoke({
-            "question": state["question"],
+            "question": question,
             "context": docs_content
         })
         response = llm.invoke(messages)
         answer = response.content
         
-        # Check if the answer indicates uncertainty or complexity
+        # Check if human support is needed
         uncertainty_indicators = [
             "don't have enough information",
             "not sure",
@@ -181,61 +205,74 @@ def generate(state: State):
         
         return {
             "answer": answer,
-            "needs_human_support": needs_human
+            "needsHumanSupport": needs_human,
+            "whatsappLink": WHATSAPP_SUPPORT_LINK if needs_human else ""
         }
+    
     except Exception as e:
         print(f"Error generating response: {e}")
         return {
-            "answer": "I'm having trouble processing your question right now. Please contact our support team for assistance.",
-            "needs_human_support": True
+            "answer": "I'm experiencing technical difficulties. Please contact our support team.",
+            "needsHumanSupport": True,
+            "whatsappLink": WHATSAPP_SUPPORT_LINK
         }
 
-# Build the application graph
-graph_builder = StateGraph(State).add_sequence([retrieve, generate])
-graph_builder.add_edge(START, "retrieve")
-graph = graph_builder.compile()
+# ============================================================================
+#                              API ENDPOINTS
+# ============================================================================
 
-def chat_interface():
-    """Main chat interface for the support agent"""
-    print("="*60)
-    print("Customer Support Agent - Digital Contract Platform")
-    print("="*60)
-    print("\nHello! I'm here to help you with any questions about our")
-    print("digital contract platform and payment processing.")
-    print("\nType 'exit' or 'quit' to end the conversation.\n")
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    """
+    Main chat endpoint - receives customer questions and returns AI responses
     
-    while True:
-        # Get user input
-        user_question = input("You: ").strip()
+    This endpoint format matches the LOVABLE FRONTEND API CALL shown above.
+    When you update the frontend code in the header comment, Copilot will
+    automatically adjust this endpoint to match.
+    """
+    try:
+        data = request.get_json()
         
-        # Check for exit commands
-        if user_question.lower() in ['exit', 'quit', 'bye']:
-            print("\nAgent: Thank you for contacting support. Have a great day!")
-            break
+        if not data or 'question' not in data:
+            return jsonify({
+                "error": "Missing 'question' field in request",
+                "needsHumanSupport": True
+            }), 400
         
-        # Skip empty input
-        if not user_question:
-            continue
+        question = data['question']
         
-        # Process the question
-        print("\nAgent: Let me check that for you...\n")
+        # Get AI response
+        response = get_ai_response(question)
         
-        try:
-            response = graph.invoke({"question": user_question})
-            
-            # Display the answer
-            print(f"Agent: {response['answer']}\n")
-            
-            # If human support is needed, provide WhatsApp link
-            if response.get('needs_human_support', False):
-                print(f"For further assistance, you can reach our support team via WhatsApp:")
-                print(f"{WHATSAPP_SUPPORT_LINK}\n")
-        
-        except Exception as e:
-            print(f"Agent: I apologize, but I'm experiencing technical difficulties.")
-            print(f"Please contact our support team via WhatsApp for immediate help:")
-            print(f"{WHATSAPP_SUPPORT_LINK}\n")
+        return jsonify(response), 200
+    
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "needsHumanSupport": True,
+            "whatsappLink": WHATSAPP_SUPPORT_LINK
+        }), 500
 
-# Main execution
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "documentsLoaded": len(docs)
+    }), 200
+
+# ============================================================================
+#                           APPLICATION STARTUP
+# ============================================================================
+
 if __name__ == "__main__":
-    chat_interface()
+    print("\n" + "="*60)
+    print("Customer Support RAG API Server")
+    print("="*60)
+    print(f"\nAPI running on: http://localhost:5001")
+    print(f"Chat endpoint: http://localhost:5001/api/chat")
+    print(f"Health check: http://localhost:5001/api/health")
+    print("\nReady to receive requests from Lovable frontend!")
+    print("="*60 + "\n")
+    
+    app.run(host='0.0.0.0', port=5001, debug=True)
