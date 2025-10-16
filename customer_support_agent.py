@@ -12,32 +12,55 @@ update the backend API to match the request/response format shown.
 ║                    (Paste your Lovable code here)                           ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-// Example - Replace this with your actual Lovable API call code:
+/**
+ * API client for the Python RAG backend
+ * Replace API_BASE_URL with your actual Python backend endpoint
+ */
 
-const sendMessage = async (message: string) => {
-  const response = await fetch('http://localhost:5001/api/chat', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      question: message
-    })
-  });
-  
-  const data = await response.json();
-  return data;
-};
+const API_BASE_URL = import.meta.env.VITE_SUPPORT_API_URL || 'http://localhost:8000';
 
-Expected Response:
-{
-  answer: string,
-  needsHumanSupport: boolean,
-  whatsappLink: string
+export interface ChatMessage {
+  question: string;
 }
 
-Last Updated: [Update this date when you paste new code]
-Frontend Repo: [Your Lovable frontend repo URL]
+export interface ChatResponse {
+  answer: string;
+  needs_human_support: boolean;
+  context?: Array<{
+    content: string;
+    category: string;
+  }>;
+}
+
+export const sendSupportMessage = async (message: string): Promise<ChatResponse> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ question: message }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`API error: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error calling support API:', error);
+    // Return a fallback response if API is unavailable
+    return {
+      answer: "I'm currently unable to process your question. Please try again later or contact support via WhatsApp.",
+      needs_human_support: true,
+    };
+  }
+};
+
+export const WHATSAPP_SUPPORT_LINK = import.meta.env.VITE_WHATSAPP_LINK || 'https://wa.me/1234567890';
+
+Last Updated: 2025-10-16
+Frontend Repo: https://github.com/Tsarri/kntrkt-nomad-assist-81125
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 """
@@ -175,8 +198,8 @@ def get_ai_response(question: str) -> dict:
         else:
             return {
                 "answer": "I don't have access to support documentation right now. Please contact our support team for assistance.",
-                "needsHumanSupport": True,
-                "whatsappLink": WHATSAPP_SUPPORT_LINK
+                "needs_human_support": True,
+                "context": []
             }
         
         # Format context
@@ -205,23 +228,29 @@ def get_ai_response(question: str) -> dict:
         
         return {
             "answer": answer,
-            "needsHumanSupport": needs_human,
-            "whatsappLink": WHATSAPP_SUPPORT_LINK if needs_human else ""
+            "needs_human_support": needs_human,
+            "context": [
+                {
+                    "content": doc.page_content,
+                    "category": doc.metadata.get("category", "General")
+                }
+                for doc in retrieved_docs
+            ]
         }
     
     except Exception as e:
         print(f"Error generating response: {e}")
         return {
             "answer": "I'm experiencing technical difficulties. Please contact our support team.",
-            "needsHumanSupport": True,
-            "whatsappLink": WHATSAPP_SUPPORT_LINK
+            "needs_human_support": True,
+            "context": []
         }
 
 # ============================================================================
 #                              API ENDPOINTS
 # ============================================================================
 
-@app.route('/api/chat', methods=['POST'])
+@app.route('/chat', methods=['POST'])
 def chat():
     """
     Main chat endpoint - receives customer questions and returns AI responses
@@ -236,7 +265,7 @@ def chat():
         if not data or 'question' not in data:
             return jsonify({
                 "error": "Missing 'question' field in request",
-                "needsHumanSupport": True
+                "needs_human_support": True
             }), 400
         
         question = data['question']
@@ -249,8 +278,7 @@ def chat():
     except Exception as e:
         return jsonify({
             "error": str(e),
-            "needsHumanSupport": True,
-            "whatsappLink": WHATSAPP_SUPPORT_LINK
+            "needs_human_support": True
         }), 500
 
 @app.route('/api/health', methods=['GET'])
@@ -269,10 +297,10 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("Customer Support RAG API Server")
     print("="*60)
-    print(f"\nAPI running on: http://localhost:5001")
-    print(f"Chat endpoint: http://localhost:5001/api/chat")
-    print(f"Health check: http://localhost:5001/api/health")
+    print(f"\nAPI running on: http://localhost:8000")
+    print(f"Chat endpoint: http://localhost:8000/chat")
+    print(f"Health check: http://localhost:8000/api/health")
     print("\nReady to receive requests from Lovable frontend!")
     print("="*60 + "\n")
     
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=8000, debug=True)
